@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -18,26 +18,15 @@
  * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
  * PERFORMANCE OF THIS SOFTWARE.
  */
+
 /*
- * Copyright (c) 2012, The Linux Foundation. All rights reserved.
- *
- * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
- *
- *
- * Permission to use, copy, modify, and/or distribute this software for
- * any purpose with or without fee is hereby granted, provided that the
- * above copyright notice and this permission notice appear in all
- * copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
- * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
- * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
- * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
- * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
+ * This file was originally distributed by Qualcomm Atheros, Inc.
+ * under proprietary terms before Copyright ownership was assigned
+ * to the Linux Foundation.
  */
+
+
+
 
 #ifndef WLAN_QCT_WLANTL_H
 #define WLAN_QCT_WLANTL_H
@@ -148,6 +137,16 @@ when        who    what, where, why
 // Choose the largest possible value that can be accomodates in 8 bit signed
 // variable.
 #define SNR_HACK_BMPS                         (127)
+#define IS_BROADCAST_ADD(_a)              \
+    ((_a)[0] == 0xff &&                         \
+     (_a)[1] == 0xff &&                         \
+     (_a)[2] == 0xff &&                         \
+     (_a)[3] == 0xff &&                         \
+     (_a)[4] == 0xff &&                         \
+     (_a)[5] == 0xff)
+
+#define IS_MULTICAST_ADD(_a)  (*(_a) & 0x01)
+
 /*--------------------------------------------------------------------------
   Access category enum used by TL
   - order must be kept as these values are used to setup the AC mask
@@ -282,9 +281,9 @@ typedef struct
  /*Flag to indicate if STA is a WAPI STA*/
   v_U8_t         ucIsWapiSta;
 
-#ifdef FEATURE_WLAN_CCX
- /*Flag to indicate if STA is a CCX STA*/
-  v_U8_t         ucIsCcxSta;
+#ifdef FEATURE_WLAN_ESE
+ /*Flag to indicate if STA is a ESE STA*/
+  v_U8_t         ucIsEseSta;
 #endif
 
   /*DPU Signature used for broadcast data - used for data caching*/
@@ -386,6 +385,18 @@ typedef enum
 }WLANTL_STAPriorityType;
 
 /*---------------------------------------------------------------------------
+  EAPOL SUB TYPE
+---------------------------------------------------------------------------*/
+typedef enum
+{
+  EAPOL_UNKNOWN  = 0,
+  EAPOL_M1,
+  EAPOL_M2,
+  EAPOL_M3,
+  EAPOL_M4
+}EAPOL_SubType;
+
+/*---------------------------------------------------------------------------
   Meta information requested from HDD by TL 
 ---------------------------------------------------------------------------*/      
 typedef struct
@@ -398,6 +409,10 @@ typedef struct
 
   /* notifying TL if this is an EAPOL frame or not */
   v_U8_t    ucIsEapol;
+
+  /* Store Eapol Subtype */
+  EAPOL_SubType    ucEapolSubType;
+
 #ifdef FEATURE_WLAN_WAPI
   /* notifying TL if this is a WAI frame or not */
   v_U8_t    ucIsWai;
@@ -440,6 +455,91 @@ typedef struct
  #endif
 }WLANTL_RxMetaInfoType;
 
+#ifdef WLAN_FEATURE_LINK_LAYER_STATS
+/* per interface per access category statistics */
+typedef PACKED_PRE struct PACKED_POST
+{
+  /* access category (VI, VO, BE, BK) */
+  v_U8_t            ac;
+
+  /*Number of successfully transmitted unicast data pkts (ACK rcvd) */
+  v_U32_t           txMpdu;
+
+  /* number of received unicast mpdu */
+  v_U32_t           rxMpdu;
+
+ /* umber of succesfully transmitted multicast data packets
+  * STA case: implies ACK received from AP for the unicast packet in which mcast
+  * pkt was sent
+  */
+  v_U32_t           txMcast;
+
+  /* number of received multicast data packets */
+  v_U32_t           rxMcast;
+
+  /* number of received unicast a-mpdu */
+  v_U32_t           rxAmpdu;
+
+  /* number of transmitted unicast a-mpdus */
+  v_U32_t           txAmpdu;
+
+  /* number of data pkt losses (no ACK) */
+  v_U32_t           mpduLost;
+
+  /* total number of data pkt retries */
+  v_U32_t           retries;
+
+  /* number of short data pkt retries */
+  v_U32_t           retriesShort;
+
+  /* number of long data pkt retries */
+  v_U32_t           retriesLong;
+
+  /* data pkt min contention time (usecs) */
+  v_U32_t           contentionTimeMin;
+
+  /* data pkt max contention time (usecs) */
+  v_U32_t           contentionTimeMax;
+
+  /* data pkt avg contention time (usecs) */
+  v_U32_t           contentionTimeAvg;
+
+  /* num of data pkts used for contention statistics */
+  v_U32_t           contentionNumSamples;
+}WLANTL_AccessCategoryStatsType;
+
+/* per interface statistics */
+typedef PACKED_PRE struct PACKED_POST
+{
+  /* access point beacon received count from connected AP */
+  v_U32_t               beaconRx;
+
+  /* access point mgmt frames received count from connected AP (including
+   * Beacon)
+   */
+  v_U32_t               mgmtRx;
+
+  /* action frames received count */
+  v_U32_t               mgmtActionRx;
+
+  /* action frames transmit count */
+  v_U32_t               mgmtActionTx;
+
+  /* access Point Beacon and Management frames RSSI (averaged) */
+  v_U32_t               rssiMgmt;
+
+  /* access Point Data Frames RSSI (averaged) from connected AP */
+  v_U32_t               rssiData;
+
+  /* access Point ACK RSSI (averaged) from connected AP */
+  v_U32_t               rssiAck;
+
+  WLANTL_AccessCategoryStatsType    accessCategoryStats[WLANTL_MAX_AC];
+
+}WLANTL_InterfaceStatsType;
+
+
+#endif
 
 /*---------------------------------------------------------------------------
   Handoff support and statistics defines and enum types
@@ -500,6 +600,13 @@ typedef tSap_SoftapStats WLANTL_TRANSFER_STA_TYPE;
 #define WLANTL_MAX_AVAIL_THRESHOLD   5
 #define WLANTL_HS_NUM_CLIENT         2
 #define WLANTL_SINGLE_CLNT_THRESHOLD 4
+
+typedef enum
+{
+  WLANTL_DEBUG_TX_SNAPSHOT = 1<<0,
+
+  WLANTL_DEBUG_FW_CLEANUP = 1<<1,
+}WLANTL_DebugFlags;
 
 /*----------------------------------------------------------------------------
  *   TL callback types
@@ -578,6 +685,22 @@ typedef VOS_STATUS (*WLANTL_STAFetchPktCBType)(
                                             WLANTL_ACEnumType     ucAC,
                                             vos_pkt_t**           vosDataBuff,
                                             WLANTL_MetaInfoType*  tlMetaInfo);
+
+/*----------------------------------------------------------------------------
+
+  DESCRIPTION
+    ULA callback registered with TL.
+    It is called by the TL when it receives EAPOL 4/4.
+
+
+  PARAMETERS
+
+    IN
+    callbackCtx:    padapter context used in callback.
+
+----------------------------------------------------------------------------*/
+
+typedef VOS_STATUS (*WLANTL_STAUlaCompleteCBType)( v_PVOID_t callbackCtx );
 
 /*----------------------------------------------------------------------------
 
@@ -1060,6 +1183,48 @@ WLANTL_RegisterSTAClient
 
 /*===========================================================================
 
+  FUNCTION    WLANTL_UpdateTdlsSTAClient
+
+  DESCRIPTION
+
+    HDD will call this API when ENABLE_LINK happens and  HDD want to
+    register QoS or other params for TDLS peers.
+
+  DEPENDENCIES
+
+    A station must have been registered before the WMM/QOS registration is
+    called.
+
+  PARAMETERS
+
+   pvosGCtx:        pointer to the global vos context; a handle to TL's
+                    control block can be extracted from its context
+   wSTADescType:    STA Descriptor, contains information related to the
+                    new added STA
+
+  RETURN VALUE
+
+    The result code associated with performing the operation
+
+    VOS_STATUS_E_FAULT: Station ID is outside array boundaries or pointer to
+                        TL cb is NULL ; access would cause a page fault
+    VOS_STATUS_E_EXISTS: Station was not registered
+    VOS_STATUS_SUCCESS:  Everything is good :)
+
+  SIDE EFFECTS
+
+============================================================================*/
+
+VOS_STATUS
+WLANTL_UpdateTdlsSTAClient
+(
+ v_PVOID_t                 pvosGCtx,
+ WLAN_STADescType*         wSTADescType
+);
+
+
+/*===========================================================================
+
   FUNCTION    WLANTL_ClearSTAClient
 
   DESCRIPTION 
@@ -1096,6 +1261,77 @@ WLANTL_ClearSTAClient
   v_PVOID_t        pvosGCtx,
   v_U8_t           ucSTAId 
 );
+
+#ifdef WLAN_FEATURE_LINK_LAYER_STATS
+/*==========================================================================
+
+  FUNCTION    WLANTL_CollectStats
+
+  DESCRIPTION
+    Utility function used by TL to send the statitics
+
+  DEPENDENCIES
+
+
+  PARAMETERS
+
+    IN
+
+    ucSTAId:    station for which the statistics need to collected
+
+    vosDataBuff: it will contain the pointer to the corresponding
+                structure
+
+  RETURN VALUE
+    The result code associated with performing the operation
+
+    VOS_STATUS_E_INVAL:   Input parameters are invalid
+    VOS_STATUS_SUCCESS:   Everything is good :)
+
+  SIDE EFFECTS
+
+============================================================================*/
+VOS_STATUS
+WLANTL_CollectInterfaceStats
+(
+  v_PVOID_t       pvosGCtx,
+  v_U8_t          ucSTAId,
+  WLANTL_InterfaceStatsType  *vosDataBuff
+);
+
+/*==========================================================================
+
+  FUNCTION    WLANTL_ClearInterfaceStats
+
+  DESCRIPTION
+    Utility function used by TL to clear the statitics
+
+  DEPENDENCIES
+
+
+  PARAMETERS
+
+    IN
+
+    ucSTAId:    station for which the statistics need to collected
+
+  RETURN VALUE
+    The result code associated with performing the operation
+
+    VOS_STATUS_E_INVAL:   Input parameters are invalid
+    VOS_STATUS_SUCCESS:   Everything is good :)
+
+  SIDE EFFECTS
+
+============================================================================*/
+VOS_STATUS
+WLANTL_ClearInterfaceStats
+(
+  v_PVOID_t       pvosGCtx,
+  v_U8_t          ucSTAId,
+  v_U8_t          statsClearReqMask
+);
+#endif
 
 /*===========================================================================
 
@@ -2642,16 +2878,16 @@ void WLANTL_PostResNeeded(v_PVOID_t pvosGCtx);
   FUNCTION    WLANTL_Finish_ULA
 
   DESCRIPTION
-     This function is used by HDD to notify TL to finish Upper layer authentication
-     incase the last EAPOL packet is pending in the TL queue. 
-     To avoid the race condition between sme set key and the last EAPOL packet 
+     This function is used by HDD to notify TL to finish Upper layer
+     authentication incase the last EAPOL packet is pending in the TL queue.
+     To avoid the race condition between sme set key and the last EAPOL packet
      the HDD module calls this function just before calling the sme_RoamSetKey.
-   
+
   DEPENDENCIES
 
     TL must have been initialized before this gets called.
 
-   
+
   PARAMETERS
 
    callbackRoutine:   HDD Callback function.
@@ -2660,13 +2896,15 @@ void WLANTL_PostResNeeded(v_PVOID_t pvosGCtx);
   RETURN VALUE
 
    VOS_STATUS_SUCCESS/VOS_STATUS_FAILURE
-   
+
   SIDE EFFECTS
-   
+
 ============================================================================*/
 
 VOS_STATUS WLANTL_Finish_ULA( void (*callbackRoutine) (void *callbackContext),
-                              void *callbackContext);
+                              void *callbackContext,
+                              v_PVOID_t pvosGCtx,
+                              v_U8_t ucSTAId);
 
 /*===============================================================================
   FUNCTION       WLANTL_UpdateRssiBmps
@@ -2959,7 +3197,7 @@ WLANTL_TxThreadDebugHandler
 v_VOID_t
 WLANTL_TLDebugMessage
 (
-  v_BOOL_t displaySnapshot
+  v_U32_t debugFlags
 );
 
 /*==========================================================================
