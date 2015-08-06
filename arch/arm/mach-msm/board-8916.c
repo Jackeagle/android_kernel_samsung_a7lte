@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,8 +25,19 @@
 #include <soc/qcom/smem.h>
 #include <soc/qcom/spm.h>
 #include <soc/qcom/pm.h>
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/sec_debug.h>
+#endif
+#ifdef CONFIG_SEC_THERMISTOR
+#include <linux/sec_thermistor.h>
+#include <linux/msm8916-thermistor.h>
+#endif
 #include "board-dt.h"
 #include "platsmp.h"
+
+#ifdef CONFIG_PROC_AVC
+#include <linux/proc_avc.h>
+#endif
 
 static void __init msm8916_dt_reserve(void)
 {
@@ -37,6 +48,12 @@ static void __init msm8916_map_io(void)
 {
 	msm_map_msm8916_io();
 }
+
+static struct platform_device *common_devices[] __initdata = {
+#ifdef CONFIG_SEC_THERMISTOR
+	&sec_device_thermistor,
+#endif
+};
 
 static struct of_dev_auxdata msm8916_auxdata_lookup[] __initdata = {
 	{}
@@ -56,9 +73,29 @@ void __init msm8916_add_drivers(void)
 	msm_pm_sleep_status_init();
 }
 
+struct class *sec_class;
+EXPORT_SYMBOL(sec_class);
+
+static void samsung_sys_class_init(void)
+{
+	sec_class = class_create(THIS_MODULE, "sec");
+
+	if (IS_ERR(sec_class)) {
+		pr_err("Failed to create class(sec)!\n");
+		return;
+	}
+};
+
 static void __init msm8916_init(void)
 {
 	struct of_dev_auxdata *adata = msm8916_auxdata_lookup;
+#ifdef CONFIG_SEC_DEBUG
+	sec_debug_init();
+#endif
+
+#ifdef CONFIG_PROC_AVC
+    	sec_avc_log_init();
+#endif
 
 	/*
 	 * populate devices from DT first so smem probe will get called as part
@@ -71,7 +108,9 @@ static void __init msm8916_init(void)
 	if (socinfo_init() < 0)
 		pr_err("%s: socinfo_init() failed\n", __func__);
 
+	samsung_sys_class_init();
 	msm8916_add_drivers();
+	platform_add_devices(common_devices, ARRAY_SIZE(common_devices));
 }
 
 static const char *msm8916_dt_match[] __initconst = {
@@ -94,12 +133,6 @@ static const char *msm8929_dt_match[] __initconst = {
 	"qcom,msm8929",
 	NULL
 };
-
-static const char *msm8939_bc_dt_match[] __initconst = {
-	"qcom,msm8939_bc",
-	NULL
-};
-
 
 static const char *msmtellurium_dt_match[] __initconst = {
 	"qcom,msmtellurium",
@@ -138,15 +171,6 @@ DT_MACHINE_START(MSM8929_DT,
 	.map_io = msm8916_map_io,
 	.init_machine = msm8916_init,
 	.dt_compat = msm8929_dt_match,
-	.reserve = msm8916_dt_reserve,
-	.smp = &msm8936_smp_ops,
-MACHINE_END
-
-DT_MACHINE_START(MSM8939_BC_DT,
-	"Qualcomm Technologies, Inc. MSM 8939_BC (Flattened Device Tree)")
-	.map_io = msm8916_map_io,
-	.init_machine = msm8916_init,
-	.dt_compat = msm8939_bc_dt_match,
 	.reserve = msm8916_dt_reserve,
 	.smp = &msm8936_smp_ops,
 MACHINE_END

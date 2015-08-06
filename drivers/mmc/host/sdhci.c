@@ -103,9 +103,14 @@ static void sdhci_dump_state(struct sdhci_host *host)
 		mmc_hostname(mmc), host->clock, mmc->clk_gated,
 		mmc->claimer->comm, host->pwr);
 	sdhci_dump_rpm_info(host);
+	if (mmc->card) {
+		pr_info("%s: card->cid : %08x%08x%08x%08x\n", mmc_hostname(mmc), 
+				mmc->card->raw_cid[0], mmc->card->raw_cid[1], 
+				mmc->card->raw_cid[2], mmc->card->raw_cid[3]);
+	}
 }
 
-static void sdhci_dumpregs(struct sdhci_host *host)
+void sdhci_dumpregs(struct sdhci_host *host)
 {
 	pr_info(DRIVER_NAME ": =========== REGISTER DUMP (%s)===========\n",
 		mmc_hostname(host->mmc));
@@ -269,6 +274,7 @@ static void sdhci_reset(struct sdhci_host *host, u8 mask)
 	if (host->ops->platform_reset_enter)
 		host->ops->platform_reset_enter(host, mask);
 
+retry_reset:
 	sdhci_writeb(host, mask, SDHCI_SOFTWARE_RESET);
 
 	if (mask & SDHCI_RESET_ALL)
@@ -286,6 +292,26 @@ static void sdhci_reset(struct sdhci_host *host, u8 mask)
 		if (timeout == 0) {
 			pr_err("%s: Reset 0x%x never completed.\n",
 				mmc_hostname(host->mmc), (int)mask);
+				if ((host->quirks2 & SDHCI_QUIRK2_USE_RESET_WORKAROUND)
+				&& host->ops->reset_workaround) {
+				if (!host->reset_wa_applied) {
+					/*
+					 * apply the workaround and issue
+					 * reset again.
+					 */
+					host->ops->reset_workaround(host, 1);
+					host->reset_wa_applied = 1;
+					host->reset_wa_cnt++;
+					goto retry_reset;
+				} else {
+					pr_err("%s: Reset 0x%x failed with workaround\n",
+						mmc_hostname(host->mmc),
+						(int)mask);
+					/* clear the workaround */
+					host->ops->reset_workaround(host, 0);
+					host->reset_wa_applied = 0;
+				}
+			}	
 			sdhci_dumpregs(host);
 			return;
 		}
@@ -295,6 +321,16 @@ static void sdhci_reset(struct sdhci_host *host, u8 mask)
 
 	if (host->ops->platform_reset_exit)
 		host->ops->platform_reset_exit(host, mask);
+	
+		if ((host->quirks2 & SDHCI_QUIRK2_USE_RESET_WORKAROUND) &&
+		host->ops->reset_workaround && host->reset_wa_applied) {
+		pr_info("%s: Reset 0x%x successful with workaround\n",
+			mmc_hostname(host->mmc), (int)mask);
+		/* clear the workaround */
+		host->ops->reset_workaround(host, 0);
+		host->reset_wa_applied = 0;
+	}
+
 
 	/* clear pending normal/error interrupt status */
 	sdhci_writel(host, sdhci_readl(host, SDHCI_INT_STATUS),
@@ -315,9 +351,11 @@ static void sdhci_init(struct sdhci_host *host, int soft)
 {
 	if (soft)
 		sdhci_reset(host, SDHCI_RESET_CMD|SDHCI_RESET_DATA);
-	else
+	else {
+		pr_info("%s: before SDHCI_RESET_ALL, PWRCTL_REG = 0x%x\n",
+				mmc_hostname(host->mmc), sdhci_readl(host, 0x1AC));
 		sdhci_reset(host, SDHCI_RESET_ALL);
-
+	}
 	sdhci_clear_set_irqs(host, SDHCI_INT_ALL_MASK,
 		SDHCI_INT_BUS_POWER | SDHCI_INT_DATA_END_BIT |
 		SDHCI_INT_DATA_CRC | SDHCI_INT_DATA_TIMEOUT | SDHCI_INT_INDEX |
@@ -1065,14 +1103,8 @@ static void sdhci_set_transfer_mode(struct sdhci_host *host,
 
 	if (data->flags & MMC_DATA_READ) {
 		mode |= SDHCI_TRNS_READ;
-		if (host->ops->toggle_cdr) {
-			if ((cmd->opcode == MMC_SEND_TUNING_BLOCK_HS200) ||
-				(cmd->opcode == MMC_SEND_TUNING_BLOCK_HS400) ||
-				(cmd->opcode == MMC_SEND_TUNING_BLOCK))
-				host->ops->toggle_cdr(host, false);
-			else
-				host->ops->toggle_cdr(host, true);
-		}
+		if (host->ops->toggle_cdr)
+			host->ops->toggle_cdr(host, true);
 	}
 	if (host->ops->toggle_cdr && (data->flags & MMC_DATA_WRITE))
 		host->ops->toggle_cdr(host, false);
@@ -1510,18 +1542,10 @@ static int sdhci_set_power(struct sdhci_host *host, unsigned short power)
 static int sdhci_enable(struct mmc_host *mmc)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
-	u32 pol_index = 0;
 
-	if (unlikely(!host->cpu_dma_latency_us))
-		goto platform_bus_vote;
-
-	if (host->cpu_dma_latency_tbl_sz > 1)
-		pol_index = host->power_policy;
-
-	pm_qos_update_request(&host->pm_qos_req_dma,
-		host->cpu_dma_latency_us[pol_index]);
-
-platform_bus_vote:
+	if (host->cpu_dma_latency_us)
+		pm_qos_update_request(&host->pm_qos_req_dma,
+					host->cpu_dma_latency_us);
 	if (host->ops->platform_bus_voting)
 		host->ops->platform_bus_voting(host, 1);
 
@@ -1531,29 +1555,24 @@ platform_bus_vote:
 static int sdhci_disable(struct mmc_host *mmc)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
-	u32 pol_index = 0;
 
-	if (unlikely(!host->cpu_dma_latency_us))
-		goto platform_bus_vote;
+	if (host->cpu_dma_latency_us) {
+		/*
+		 * In performance mode, release QoS vote after a timeout to
+		 * make sure back-to-back requests don't suffer from latencies
+		 * that are involved to wake CPU from low power modes in cases
+		 * where the CPU goes into low power mode as soon as QoS vote is
+		 * released.
+		 */
+		if (host->power_policy == SDHCI_PERFORMANCE_MODE)
+			pm_qos_update_request_timeout(&host->pm_qos_req_dma,
+					host->cpu_dma_latency_us,
+					host->pm_qos_timeout_us);
+		else
+			pm_qos_update_request(&host->pm_qos_req_dma,
+					PM_QOS_DEFAULT_VALUE);
+	}
 
-	if (host->cpu_dma_latency_tbl_sz > 1)
-		pol_index = host->power_policy;
-	/*
-	 * In performance mode, release QoS vote after a timeout to
-	 * make sure back-to-back requests don't suffer from latencies
-	 * that are involved to wake CPU from low power modes in cases
-	 * where the CPU goes into low power mode as soon as QoS vote is
-	 * released.
-	 */
-	if (host->power_policy == SDHCI_POWER_SAVE_MODE)
-		pm_qos_update_request(&host->pm_qos_req_dma,
-			PM_QOS_DEFAULT_VALUE);
-	else
-		pm_qos_update_request_timeout(&host->pm_qos_req_dma,
-			host->cpu_dma_latency_us[pol_index],
-			host->pm_qos_timeout_us);
-
-platform_bus_vote:
 	if (host->ops->platform_bus_voting)
 		host->ops->platform_bus_voting(host, 0);
 
@@ -1574,9 +1593,6 @@ static int sdhci_notify_load(struct mmc_host *mmc, enum mmc_load state)
 	switch (state) {
 	case MMC_LOAD_HIGH:
 		sdhci_update_power_policy(host, SDHCI_PERFORMANCE_MODE);
-		break;
-	case MMC_LOAD_INIT:
-		sdhci_update_power_policy(host, SDHCI_PERFORMANCE_MODE_INIT);
 		break;
 	case MMC_LOAD_LOW:
 		sdhci_update_power_policy(host, SDHCI_POWER_SAVE_MODE);
@@ -2023,10 +2039,11 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 	 */
 	if (ios->power_mode == MMC_POWER_OFF) {
 		sdhci_writel(host, 0, SDHCI_SIGNAL_ENABLE);
+		host->hc_pwrctrl_reg = sdhci_readl(host, HC_VENDOR_SPEC_PWR_REG);
+		pr_err("%s: %s: HC_VEN_PWR_REG before reset all 0x%x\n",
+				mmc_hostname(host->mmc), __func__, host->hc_pwrctrl_reg);
 		sdhci_reinit(host);
-		vdd_bit = sdhci_set_power(host, -1);
-		if (host->vmmc && vdd_bit != -1)
-			mmc_regulator_set_ocr(host->mmc, host->vmmc, vdd_bit);
+		host->pwr = 0;
 	}
 	if (!ios->clock) {
 		if (host->async_int_supp && host->mmc->card &&
@@ -3594,7 +3611,6 @@ int sdhci_add_host(struct sdhci_host *host)
 			>> SDHCI_CLOCK_BASE_SHIFT;
 
 	host->max_clk *= 1000000;
-	sdhci_update_power_policy(host, SDHCI_PERFORMANCE_MODE_INIT);
 	if (host->max_clk == 0 || host->quirks &
 			SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN) {
 		if (!host->ops->get_max_clock) {
@@ -4051,7 +4067,6 @@ void sdhci_remove_host(struct sdhci_host *host, int dead)
 		spin_unlock_irqrestore(&host->lock, flags);
 	}
 
-	sdhci_update_power_policy(host, SDHCI_POWER_SAVE_MODE);
 	sdhci_disable_card_detection(host);
 
 	if (host->cpu_dma_latency_us)

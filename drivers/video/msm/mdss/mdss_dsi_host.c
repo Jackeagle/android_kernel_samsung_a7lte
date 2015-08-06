@@ -71,6 +71,12 @@ static struct mdss_dsi_event dsi_event;
 
 static int dsi_event_thread(void *data);
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+struct mdss_dsi_ctrl_pdata **mdss_dsi_get_ctrl(void)
+{
+	return ctrl_list;
+}
+#endif
 void mdss_dsi_ctrl_init(struct device *ctrl_dev,
 			struct mdss_dsi_ctrl_pdata *ctrl)
 {
@@ -343,7 +349,17 @@ void mdss_dsi_host_init(struct mdss_panel_data *pdata)
 	if (pinfo->data_lane0)
 		dsi_ctrl |= BIT(4);
 
-
+	/* from frame buffer, low power mode */
+	/* DSI_COMMAND_MODE_DMA_CTRL */
+/*
+	if (mdss_dsi_broadcast_mode_enabled())
+		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x3C, 0x94000000);
+	else
+		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x3C, 0x14000000);
+*/
+#if defined(CONFIG_SEC_GT510_PROJECT)
+	MIPI_OUTP(ctrl_pdata->ctrl_base + 0x3C, 0x10000000);
+#endif
 	data = 0;
 	if (pinfo->te_sel)
 		data |= BIT(31);
@@ -829,7 +845,7 @@ void mdss_dsi_op_mode_config(int mode,
 			DSI_INTR_CMD_MDP_DONE_MASK | DSI_INTR_BTA_DONE_MASK;
 	}
 
-	dma_ctrl = BIT(28) | BIT(26);	/* embedded mode & LP mode */
+	dma_ctrl = BIT(28);	/* embedded mode & HS mode */
 	if (mdss_dsi_sync_wait_enable(ctrl_pdata))
 		dma_ctrl |= BIT(31);
 
@@ -939,8 +955,7 @@ static void mdss_dsi_mode_setup(struct mdss_panel_data *pdata)
 	struct mipi_panel_info *mipi;
 	u32 clk_rate;
 	u32 hbp, hfp, vbp, vfp, hspw, vspw, width, height;
-	u32 ystride, bpp, dst_bpp;
-	u32 stream_ctrl, stream_total;
+	u32 ystride, bpp, data, dst_bpp;
 	u32 dummy_xres = 0, dummy_yres = 0;
 	u32 hsync_period, vsync_period;
 
@@ -1004,25 +1019,15 @@ static void mdss_dsi_mode_setup(struct mdss_panel_data *pdata)
 
 		ystride = width * bpp + 1;
 
-		if (pinfo->partial_update_enabled &&
-			mdss_dsi_is_panel_on(pdata) && pinfo->roi.w &&
-			pinfo->roi.h) {
-			stream_ctrl = (((pinfo->roi.w * bpp) + 1) << 16) |
-					(mipi->vc << 8) | DTYPE_DCS_LWRITE;
-			stream_total = pinfo->roi.h << 16 | pinfo->roi.w;
-		} else {
-			stream_ctrl = (ystride << 16) | (mipi->vc << 8) |
-					DTYPE_DCS_LWRITE;
-			stream_total = height << 16 | width;
-		}
-
 		/* DSI_COMMAND_MODE_MDP_STREAM_CTRL */
-		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x60, stream_ctrl);
-		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x58, stream_ctrl);
+		data = (ystride << 16) | (mipi->vc << 8) | DTYPE_DCS_LWRITE;
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x60, data);
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x58, data);
 
 		/* DSI_COMMAND_MODE_MDP_STREAM_TOTAL */
-		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x64, stream_total);
-		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x5C, stream_total);
+		data = height << 16 | width;
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x64, data);
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x5C, data);
 	}
 }
 
@@ -1134,6 +1139,7 @@ static int mdss_dsi_cmds2buf_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 	mdss_dsi_buf_init(tp);
 	cm = cmds;
 	len = 0;
+
 	while (cnt--) {
 		dchdr = &cm->dchdr;
 		mdss_dsi_buf_reserve(tp, len);
@@ -1218,6 +1224,8 @@ int mdss_dsi_cmds_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 	 * For video mode, do not send cmds more than one pixel line,
 	 * since it only transmit it during BLLP.
 	 */
+
+
 
 	if (mdss_dsi_sync_wait_enable(ctrl)) {
 		if (mdss_dsi_sync_wait_trigger(ctrl)) {
@@ -1336,13 +1344,25 @@ do_send:
 		pkt_size = rlen;
 		rx_byte = 4;
 	} else {
-		short_response = 0;
-		data_byte = 10;	/* first read */
+		/*short_response = 0;
+		data_byte = 10;
 		if (rlen < data_byte)
 			pkt_size = rlen;
 		else
 			pkt_size = data_byte;
-		rx_byte = data_byte + 6; /* 4 header + 2 crc */
+		rx_byte = data_byte + 6;*/
+
+		short_response = 0;
+		data_byte = 8;	/* first read */
+		/*
+		 * add extra 2 padding bytes to have overall
+		 * packet size is multipe by 4. This also make
+		 * sure 4 bytes dcs headerlocates within a
+		 * 32 bits register after shift in.
+		 */
+		pkt_size = data_byte + 2;
+		rx_byte = data_byte + 8; /* 4 header + 2 crc  + 2 padding*/
+
 	}
 
 
@@ -1574,9 +1594,11 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 
 	ret = wait_for_completion_timeout(&ctrl->dma_comp,
 				msecs_to_jiffies(DMA_TX_TIMEOUT));
-	if (ret == 0)
+	if (ret == 0) {
+		pr_err("MIPI dma tx timeout!!\n");
+		MDSS_XLOG_TOUT_HANDLER("mdp", "dsi0", "dsi1", "edp", "hdmi", "panic");
 		ret = -ETIMEDOUT;
-	else
+	} else
 		ret = tp->len;
 
 	if (mctrl && mctrl->dma_addr) {
@@ -1845,7 +1867,6 @@ int mdss_dsi_cmdlist_rx(struct mdss_dsi_ctrl_pdata *ctrl,
 		rp = &ctrl->rx_buf;
 		len = mdss_dsi_cmds_rx(ctrl, req->cmds, req->rlen);
 		memcpy(req->rbuf, rp->data, rp->len);
-		ctrl->rx_len = len;
 	} else {
 		pr_err("%s: No rx buffer provided\n", __func__);
 	}
@@ -1981,7 +2002,7 @@ static int dsi_event_thread(void *data)
 	struct mdss_dsi_ctrl_pdata *ctrl;
 	unsigned long flag;
 	struct sched_param param;
-	u32 todo = 0, ln_status;
+	u32 todo = 0, ln_status, force_clk_ln_hs;
 	int ret;
 
 	param.sched_priority = 16;
@@ -2037,9 +2058,12 @@ static int dsi_event_thread(void *data)
 			 * clock lane is not in Stop State.
 			 */
 			ln_status = MIPI_INP(ctrl->ctrl_base + 0x00a8);
+			force_clk_ln_hs = (MIPI_INP(ctrl->ctrl_base + 0x00ac)
+					& BIT(28));
 			pr_debug("%s: lane_status: 0x%x\n",
 				       __func__, ln_status);
 			if (ctrl->recovery
+					&& !(force_clk_ln_hs)
 					&& (ln_status
 						& DSI_DATA_LANES_STOP_STATE)
 					&& !(ln_status

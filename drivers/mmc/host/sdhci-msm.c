@@ -104,6 +104,11 @@ enum sdc_mpm_pin_state {
 #define CORE_HC_SELECT_IN_HS400	(6 << 19)
 #define CORE_HC_SELECT_IN_MASK	(7 << 19)
 
+#define CORE_VENDOR_SPEC_FUNC2 0x110
+#define HC_SW_RST_WAIT_IDLE_DIS	(1 << 20)
+#define HC_SW_RST_REQ (1 << 21)
+#define CORE_ONE_MID_EN     (1 << 25)
+
 #define CORE_VENDOR_SPEC_CAPABILITIES0	0x11C
 #define CORE_8_BIT_SUPPORT		(1 << 18)
 #define CORE_3_3V_SUPPORT		(1 << 24)
@@ -304,12 +309,10 @@ struct sdhci_msm_pltfm_data {
 	struct sdhci_msm_slot_reg_data *vreg_data;
 	bool nonremovable;
 	bool nonhotplug;
-	bool no_1p8v;
 	bool pin_cfg_sts;
 	struct sdhci_msm_pin_data *pin_data;
 	struct sdhci_pinctrl_data *pctrl_data;
-	u32 *cpu_dma_latency_us;
-	unsigned int cpu_dma_latency_tbl_sz;
+	u32 cpu_dma_latency_us;
 	int status_gpio; /* card detection GPIO that is configured as IRQ */
 	struct sdhci_msm_bus_voting_data *voting_data;
 	u32 *sup_clk_table;
@@ -1486,12 +1489,11 @@ static struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev)
 	struct sdhci_msm_pltfm_data *pdata = NULL;
 	struct device_node *np = dev->of_node;
 	u32 bus_width = 0;
-	u32 prop_val = 0;
+	u32 cpu_dma_latency;
 	int len, i, mpm_int;
 	int clk_table_len;
 	u32 *clk_table = NULL;
 	enum of_gpio_flags flags = OF_GPIO_ACTIVE_LOW;
-	bool skip_qos_from_dt = false;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata) {
@@ -1513,52 +1515,11 @@ static struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev)
 		pdata->mmc_bus_width = 0;
 	}
 
-	if (of_get_property(np, "qcom,cpu-dma-latency-us",
-				&prop_val)) {
-
-		pdata->cpu_dma_latency_tbl_sz =
-			prop_val/sizeof(*pdata->cpu_dma_latency_us);
-
-		if (!(pdata->cpu_dma_latency_tbl_sz == 1 ||
-			pdata->cpu_dma_latency_tbl_sz == 3)) {
-			dev_warn(dev, "incorrect Qos param passed from DT: %d\n",
-				pdata->cpu_dma_latency_tbl_sz);
-			skip_qos_from_dt = true;
-		} else {
-			pdata->cpu_dma_latency_us = devm_kzalloc(dev,
-				sizeof(*pdata->cpu_dma_latency_us) *
-				pdata->cpu_dma_latency_tbl_sz,
-				GFP_KERNEL);
-			if (!pdata->cpu_dma_latency_us) {
-				dev_err(dev, "No memory for cpu_dma_latency_us\n");
-				goto out;
-			}
-			if (of_property_read_u32_array(np,
-					"qcom,cpu-dma-latency-us",
-					pdata->cpu_dma_latency_us,
-					pdata->cpu_dma_latency_tbl_sz)) {
-				dev_err(dev, "failed to parse cpu-dma-latency\n");
-				goto out;
-			}
-		}
-	} else {
-		dev_info(dev, "no qcom,cpu-dma-latency-us found\n");
-		skip_qos_from_dt = true;
-	}
-
-	if (skip_qos_from_dt) {
-		pdata->cpu_dma_latency_tbl_sz = 1;
-		pdata->cpu_dma_latency_us = devm_kzalloc(dev,
-			sizeof(*pdata->cpu_dma_latency_us) *
-			pdata->cpu_dma_latency_tbl_sz,
-			GFP_KERNEL);
-		if (!pdata->cpu_dma_latency_us) {
-			dev_err(dev, "No memory for cpu_dma_latency_us\n");
-			goto out;
-		}
-		pdata->cpu_dma_latency_us[0] = MSM_MMC_DEFAULT_CPU_DMA_LATENCY;
-	}
-
+	if (!of_property_read_u32(np, "qcom,cpu-dma-latency-us",
+				&cpu_dma_latency))
+		pdata->cpu_dma_latency_us = cpu_dma_latency;
+	else
+		pdata->cpu_dma_latency_us = MSM_MMC_DEFAULT_CPU_DMA_LATENCY;
 	if (sdhci_msm_dt_get_array(dev, "qcom,clk-rates",
 			&clk_table, &clk_table_len, 0)) {
 		dev_err(dev, "failed parsing supported clock rates\n");
@@ -1627,9 +1588,6 @@ static struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev)
 
 	if (of_get_property(np, "qcom,nonhotplug", NULL))
 		pdata->nonhotplug = true;
-
-	if (of_property_read_bool(np, "qcom,no-1p8v"))
-		pdata->no_1p8v = true;
 
 	if (!of_property_read_u32(np, "qcom,dat1-mpm-int",
 				  &mpm_int))
@@ -2174,6 +2132,8 @@ static irqreturn_t sdhci_msm_sdiowakeup_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+void sdhci_dumpregs(struct sdhci_host *host);
+static int sdhci_msm_enable_controller_clock(struct sdhci_host *host);
 static irqreturn_t sdhci_msm_pwr_irq(int irq, void *data)
 {
 	struct sdhci_host *host = (struct sdhci_host *)data;
@@ -2185,9 +2145,21 @@ static irqreturn_t sdhci_msm_pwr_irq(int irq, void *data)
 	int pwr_state = 0, io_level = 0;
 	unsigned long flags;
 
+	if (!IS_ERR(msm_host->pclk)) {
+		ret = clk_prepare_enable(msm_host->pclk);
+		if (ret)
+			pr_err("%s: %s: failed to enable the pclk with error %d\n",
+				mmc_hostname(host->mmc), __func__, ret);
+	}
+
 	irq_status = readb_relaxed(msm_host->core_mem + CORE_PWRCTL_STATUS);
 	pr_debug("%s: Received IRQ(%d), status=0x%x\n",
 		mmc_hostname(msm_host->mmc), irq, irq_status);
+
+	if ((irq_status & msm_host->curr_pwr_state) ||
+		(irq_status & msm_host->curr_io_level))
+		pr_err("spurious IRQ 0x%x pwr_ctrl_reg 0x%x\n", irq_status,
+			readl_relaxed(msm_host->core_mem + CORE_PWRCTL_CTL));
 
 	/* Clear the interrupt */
 	writeb_relaxed(irq_status, (msm_host->core_mem + CORE_PWRCTL_CLEAR));
@@ -2281,6 +2253,9 @@ static irqreturn_t sdhci_msm_pwr_irq(int irq, void *data)
 		msm_host->curr_io_level = io_level;
 	complete(&msm_host->pwr_irq_completion);
 	spin_unlock_irqrestore(&host->lock, flags);
+
+	if (!IS_ERR(msm_host->pclk)) 
+		clk_disable_unprepare(msm_host->pclk);
 
 	return IRQ_HANDLED;
 }
@@ -2411,18 +2386,14 @@ static void sdhci_msm_check_power_status(struct sdhci_host *host, u32 req_type)
 
 static void sdhci_msm_toggle_cdr(struct sdhci_host *host, bool enable)
 {
-	u32 config;
-	config = readl_relaxed(host->ioaddr + CORE_DLL_CONFIG);
-
-	if (enable) {
-		config |= CORE_CDR_EN;
-		config &= ~CORE_CDR_EXT_EN;
-		writel_relaxed(config, host->ioaddr + CORE_DLL_CONFIG);
-	} else {
-		config &= ~CORE_CDR_EN;
-		config |= CORE_CDR_EXT_EN;
-		writel_relaxed(config, host->ioaddr + CORE_DLL_CONFIG);
-	}
+	if (enable)
+		writel_relaxed((readl_relaxed(host->ioaddr +
+					      CORE_DLL_CONFIG) | CORE_CDR_EN),
+			       host->ioaddr + CORE_DLL_CONFIG);
+	else
+		writel_relaxed((readl_relaxed(host->ioaddr +
+					      CORE_DLL_CONFIG) & ~CORE_CDR_EN),
+			       host->ioaddr + CORE_DLL_CONFIG);
 }
 
 static unsigned int sdhci_msm_max_segs(void)
@@ -2912,6 +2883,8 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC),
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_ADMA_ERR_ADDR0),
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_ADMA_ERR_ADDR1));
+    pr_info("Vndr func2: 0x%08x\n",
+	    readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2));
 
 	/*
 	 * tbsel indicates [2:0] bits and tbsel2 indicates [7:4] bits
@@ -2941,6 +2914,75 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 	/* Disable test bus */
 	writel_relaxed(~CORE_TESTBUS_ENA, msm_host->core_mem +
 			CORE_TESTBUS_CONFIG);
+
+	pr_info("PWRCTL_STATUS: 0x%08x | PWRCTL_MASK: 0x%08x | PWRCTL_CTL: 0x%08x\n",
+			readl_relaxed(msm_host->core_mem + CORE_PWRCTL_STATUS),
+			readl_relaxed(msm_host->core_mem + CORE_PWRCTL_MASK),
+			readl_relaxed(msm_host->core_mem + CORE_PWRCTL_CTL));
+
+	pr_info("-------- MCI Registers -------- \n");
+
+	for(i = 0;i < 0x1C0;i+=16) {
+		pr_info("0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+				i,
+				readl_relaxed(msm_host->core_mem + i),
+				readl_relaxed(msm_host->core_mem + i + 4),
+				readl_relaxed(msm_host->core_mem + i + 8),
+				readl_relaxed(msm_host->core_mem + i + 12));
+	}
+
+	pr_info("-------- HC Registers -------- \n");
+
+	for(i = 0;i < 0x1C0 ;i+=16) {
+		pr_info("0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+				i,
+				readl_relaxed(host->ioaddr + i),
+				readl_relaxed(host->ioaddr + i + 4),
+				readl_relaxed(host->ioaddr + i + 8),
+				readl_relaxed(host->ioaddr + i + 12));
+	}
+}
+
+void sdhci_msm_reset_workaround(struct sdhci_host *host, u32 enable)
+{
+	u32 vendor_func2;
+	unsigned long timeout;
+
+	vendor_func2 = readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
+
+	if (enable) {
+		writel_relaxed(vendor_func2 | HC_SW_RST_REQ, host->ioaddr +
+				CORE_VENDOR_SPEC_FUNC2);
+		timeout = 10000;
+		while (readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2) &
+				HC_SW_RST_REQ) {
+			if (timeout == 0) {
+				pr_info("%s: Applying wait idle disable workaround\n",
+					mmc_hostname(host->mmc));
+				/*
+				 * Apply the reset workaround to not wait for
+				 * pending data transfers on AXI before
+				 * resetting the controller. This could be
+				 * risky if the transfers were stuck on the
+				 * AXI bus.
+				 */
+				vendor_func2 = readl_relaxed(host->ioaddr +
+						CORE_VENDOR_SPEC_FUNC2);
+				writel_relaxed(vendor_func2 |
+					HC_SW_RST_WAIT_IDLE_DIS,
+					host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
+				host->reset_wa_t = ktime_get();
+				return;
+			}
+			timeout--;
+			udelay(10);
+		}
+		pr_info("%s: waiting for SW_RST_REQ is successful\n",
+				mmc_hostname(host->mmc));
+	} else {
+		writel_relaxed(vendor_func2 & ~HC_SW_RST_WAIT_IDLE_DIS,
+				host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
+	}
 }
 
 static struct sdhci_ops sdhci_msm_ops = {
@@ -2956,6 +2998,8 @@ static struct sdhci_ops sdhci_msm_ops = {
 	.dump_vendor_regs = sdhci_msm_dump_vendor_regs,
 	.config_auto_tuning_cmd = sdhci_msm_config_auto_tuning_cmd,
 	.enable_controller_clock = sdhci_msm_enable_controller_clock,
+	.reset_workaround = sdhci_msm_reset_workaround,
+
 };
 
 static int sdhci_msm_cfg_mpm_pin_wakeup(struct sdhci_host *host, unsigned mode)
@@ -2996,12 +3040,23 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 	u32 version, caps;
 	u16 minor;
 	u8 major;
+    u32 val;
 
 	version = readl_relaxed(msm_host->core_mem + CORE_MCI_VERSION);
 	major = (version & CORE_VERSION_MAJOR_MASK) >>
 			CORE_VERSION_MAJOR_SHIFT;
 	minor = version & CORE_VERSION_TARGET_MASK;
 
+	/* Enable one MID mode for SDCC5 (major 1) on 8916/8939 (minor 0x2e) and
+	 * on 8992 (minor 0x3e) as a workaround to reset for data stuck issue.
+	 */
+	if (major == 1 && (minor == 0x2e || minor == 0x3e)) {
+		host->quirks2 |= SDHCI_QUIRK2_USE_RESET_WORKAROUND;
+		val = readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
+		writel_relaxed((val | CORE_ONE_MID_EN),
+			host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
+	}
+	
 	/*
 	 * Starting with SDCC 5 controller (core major version = 1)
 	 * controller won't advertise 3.0v, 1.8v and 8-bit features
@@ -3042,6 +3097,46 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 	caps &= ~CORE_SYS_BUS_SUPPORT_64_BIT;
 	writel_relaxed(caps, host->ioaddr + CORE_VENDOR_SPEC_CAPABILITIES0);
 }
+
+/* SYSFS about SD Card Detection */
+extern struct class *sec_class;
+static struct device *t_flash_detect_dev;
+
+static ssize_t t_flash_detect_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct sdhci_msm_host *msm_host = dev_get_drvdata(dev);
+#if (defined(CONFIG_NO_DETECT_PIN) || defined(CONFIG_SEC_HYBRID_TRAY))
+	if (msm_host->mmc->card) {
+		printk(KERN_DEBUG "sdcc2: card inserted.\n");
+		return sprintf(buf, "Insert\n");
+	} else {
+		printk(KERN_DEBUG "sdcc2: card removed.\n");
+		return sprintf(buf, "Remove\n");
+	}
+#else
+	unsigned int detect;
+
+	if (gpio_is_valid(msm_host->pdata->status_gpio))
+		detect = gpio_get_value(msm_host->pdata->status_gpio);
+
+	else {
+		pr_info("%s : External  SD detect pin Error\n", __func__);
+		return sprintf(buf, "Error\n");
+	}
+
+	pr_info("%s : detect = %d.\n", __func__, detect);
+	if (!detect) {
+		printk(KERN_DEBUG "SD card inserted.\n");
+		return sprintf(buf, "Insert\n");
+	} else {
+		printk(KERN_DEBUG "SD card removed.\n");
+		return sprintf(buf, "Remove\n");
+	}
+#endif
+}
+
+static DEVICE_ATTR(status, 0444, t_flash_detect_show, NULL);
 
 static int sdhci_msm_probe(struct platform_device *pdev)
 {
@@ -3278,9 +3373,6 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	host->quirks2 |= SDHCI_QUIRK2_IGN_DATA_END_BIT_ERROR;
 	host->quirks2 |= SDHCI_QUIRK2_ADMA_SKIP_DATA_ALIGNMENT;
 
-	if (msm_host->pdata->no_1p8v)
-		host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
-
 	/* Setup PWRCTL irq */
 	msm_host->pwr_irq = platform_get_irq_byname(pdev, "pwr_irq");
 	if (msm_host->pwr_irq < 0) {
@@ -3307,14 +3399,14 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps |= msm_host->pdata->mmc_bus_width;
 	msm_host->mmc->caps |= msm_host->pdata->caps;
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
-	msm_host->mmc->caps2 |= MMC_CAP2_CORE_RUNTIME_PM;
-	msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR;
-	msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR_CONTROL;
+	//msm_host->mmc->caps2 |= MMC_CAP2_CORE_RUNTIME_PM;
+	//msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR;
+	//msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR_CONTROL;
 	msm_host->mmc->caps2 |= (MMC_CAP2_BOOTPART_NOACC |
 				MMC_CAP2_DETECT_ON_ERR);
 	msm_host->mmc->caps2 |= MMC_CAP2_CACHE_CTRL;
 	msm_host->mmc->caps2 |= MMC_CAP2_POWEROFF_NOTIFY;
-	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
+	//msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
 	msm_host->mmc->caps2 |= MMC_CAP2_STOP_REQUEST;
 	msm_host->mmc->caps2 |= MMC_CAP2_ASYNC_SDIO_IRQ_4BIT_MODE;
 	msm_host->mmc->pm_caps |= MMC_PM_KEEP_POWER | MMC_PM_WAKE_SDIO_IRQ;
@@ -3327,7 +3419,6 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		msm_host->mmc->caps2 |= MMC_CAP2_NONHOTPLUG;
 
 	host->cpu_dma_latency_us = msm_host->pdata->cpu_dma_latency_us;
-	host->cpu_dma_latency_tbl_sz = msm_host->pdata->cpu_dma_latency_tbl_sz;
 	host->pm_qos_req_dma.type = msm_host->pdata->cpu_affinity_type;
 
 	init_completion(&msm_host->pwr_irq_completion);
@@ -3339,7 +3430,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		 * weird/inconsistent state resulting in flood of interrupts.
 		 */
 		sdhci_msm_setup_pins(msm_host->pdata, true);
-
+		mdelay(10);
 		ret = mmc_gpio_request_cd(msm_host->mmc,
 				msm_host->pdata->status_gpio);
 		if (ret) {
@@ -3347,6 +3438,26 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 					__func__, ret);
 			goto vreg_deinit;
 		}
+	}
+	/* SYSFS about SD Card Detection by soonil.lim */
+#if (defined(CONFIG_NO_DETECT_PIN) || defined(CONFIG_MACH_KLEOS_EUR))
+	if (t_flash_detect_dev == NULL && !strcmp(host->hw_name, "7864900.sdhci")) {
+#else
+	if (t_flash_detect_dev == NULL && gpio_is_valid(msm_host->pdata->status_gpio)) {
+#endif
+		printk(KERN_DEBUG "%s : Change sysfs Card Detect\n", __func__);
+
+		t_flash_detect_dev = device_create(sec_class,
+				NULL, 0, NULL, "sdcard");
+		if (IS_ERR(t_flash_detect_dev))
+			pr_err("%s : Failed to create device!\n", __func__);
+
+		if (device_create_file(t_flash_detect_dev,
+			&dev_attr_status) < 0)
+			pr_err("%s : Failed to create device file(%s)!\n",
+					__func__, dev_attr_status.attr.name);
+
+		dev_set_drvdata(t_flash_detect_dev, msm_host);
 	}
 
 	if ((sdhci_readl(host, SDHCI_CAPABILITIES) & SDHCI_CAN_64BIT) &&

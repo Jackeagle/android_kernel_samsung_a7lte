@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -97,14 +97,14 @@ static int msm_spi_pinctrl_init(struct msm_spi *dd)
 		return PTR_ERR(dd->pinctrl);
 	}
 	dd->pins_active = pinctrl_lookup_state(dd->pinctrl,
-				SPI_PINCTRL_STATE_DEFAULT);
+				PINCTRL_STATE_DEFAULT);
 	if (IS_ERR_OR_NULL(dd->pins_active)) {
 		dev_err(dd->dev, "Failed to lookup pinctrl default state\n");
 		return PTR_ERR(dd->pins_active);
 	}
 
 	dd->pins_sleep = pinctrl_lookup_state(dd->pinctrl,
-				SPI_PINCTRL_STATE_SLEEP);
+				PINCTRL_STATE_SLEEP);
 	if (IS_ERR_OR_NULL(dd->pins_sleep)) {
 		dev_err(dd->dev, "Failed to lookup pinctrl sleep state\n");
 		return PTR_ERR(dd->pins_sleep);
@@ -136,7 +136,7 @@ static inline int msm_spi_request_gpios(struct msm_spi *dd)
 		result = pinctrl_select_state(dd->pinctrl, dd->pins_active);
 		if (result) {
 			dev_err(dd->dev, "%s: Can not set %s pins\n",
-			__func__, SPI_PINCTRL_STATE_DEFAULT);
+			__func__, PINCTRL_STATE_DEFAULT);
 			goto error;
 		}
 	}
@@ -172,7 +172,7 @@ static inline void msm_spi_free_gpios(struct msm_spi *dd)
 		result = pinctrl_select_state(dd->pinctrl, dd->pins_sleep);
 		if (result)
 			dev_err(dd->dev, "%s: Can not set %s pins\n",
-			__func__, SPI_PINCTRL_STATE_SLEEP);
+			__func__, PINCTRL_STATE_SLEEP);
 	}
 }
 
@@ -1839,17 +1839,19 @@ static int msm_spi_transfer_one_message(struct spi_master *master,
 	 * get local resources for each transfer to ensure we're in a good
 	 * state and not interfering with other EE's using this device
 	 */
-	if (get_local_resources(dd)) {
-		mutex_unlock(&dd->core_lock);
-		return -EINVAL;
-	}
+	if (dd->pdata->is_shared) {
+		if (get_local_resources(dd)) {
+			mutex_unlock(&dd->core_lock);
+			return -EINVAL;
+		}
 
-	reset_core(dd);
-	if (dd->use_dma) {
-		msm_spi_bam_pipe_connect(dd, &dd->bam.prod,
-				&dd->bam.prod.config);
-		msm_spi_bam_pipe_connect(dd, &dd->bam.cons,
-				&dd->bam.cons.config);
+		reset_core(dd);
+		if (dd->use_dma) {
+			msm_spi_bam_pipe_connect(dd, &dd->bam.prod,
+					&dd->bam.prod.config);
+			msm_spi_bam_pipe_connect(dd, &dd->bam.cons,
+					&dd->bam.cons.config);
+		}
 	}
 
 	if (dd->suspended || !msm_spi_is_valid_state(dd)) {
@@ -1876,11 +1878,13 @@ static int msm_spi_transfer_one_message(struct spi_master *master,
 	 * different context since we're running in the spi kthread here) to
 	 * prevent race conditions between us and any other EE's using this hw.
 	 */
-	if (dd->use_dma) {
-		msm_spi_bam_pipe_disconnect(dd, &dd->bam.prod);
-		msm_spi_bam_pipe_disconnect(dd, &dd->bam.cons);
+	if (dd->pdata->is_shared) {
+		if (dd->use_dma) {
+			msm_spi_bam_pipe_disconnect(dd, &dd->bam.prod);
+			msm_spi_bam_pipe_disconnect(dd, &dd->bam.cons);
+		}
+		put_local_resources(dd);
 	}
-	put_local_resources(dd);
 	mutex_unlock(&dd->core_lock);
 	if (dd->suspended)
 		wake_up_interruptible(&dd->continue_suspend);
@@ -1943,10 +1947,11 @@ static int msm_spi_setup(struct spi_device *spi)
 	dd = spi_master_get_devdata(spi->master);
 
 	pm_runtime_get_sync(dd->dev);
-	rc = get_local_resources(dd);
-	if (rc)
-		goto no_resources;
-
+	if (dd->pdata->is_shared) {
+		rc = get_local_resources(dd);
+		if (rc)
+			goto no_resources;
+	}
 
 	mutex_lock(&dd->core_lock);
 
@@ -1983,7 +1988,8 @@ static int msm_spi_setup(struct spi_device *spi)
 
 err_setup_exit:
 	mutex_unlock(&dd->core_lock);
-	put_local_resources(dd);
+	if (dd->pdata->is_shared)
+		put_local_resources(dd);
 no_resources:
 	pm_runtime_mark_last_busy(dd->dev);
 	pm_runtime_put_autosuspend(dd->dev);
@@ -2391,6 +2397,8 @@ struct msm_spi_platform_data *msm_spi_dt_to_pdata(
 			&dd->cs_gpios[3].gpio_num,       DT_OPT,  DT_GPIO, -1},
 		{"qcom,rt-priority",
 			&pdata->rt_priority,		 DT_OPT,  DT_BOOL,  0},
+		{"qcom,shared",
+			&pdata->is_shared,		 DT_OPT,  DT_BOOL,  0},
 		{NULL,  NULL,                            0,       0,        0},
 		};
 
@@ -2761,9 +2769,14 @@ static int msm_spi_pm_suspend_runtime(struct device *device)
 	wait_event_interruptible(dd->continue_suspend,
 		!dd->transfer_pending);
 
+	if (dd->pdata && !dd->pdata->is_shared && dd->use_dma) {
+		msm_spi_bam_pipe_disconnect(dd, &dd->bam.prod);
+		msm_spi_bam_pipe_disconnect(dd, &dd->bam.cons);
+	}
 	if (dd->pdata && !dd->pdata->active_only)
 		msm_spi_clk_path_unvote(dd);
-
+	if (dd->pdata && !dd->pdata->is_shared)
+		put_local_resources(dd);
 suspend_exit:
 	return 0;
 }
@@ -2783,10 +2796,17 @@ static int msm_spi_pm_resume_runtime(struct device *device)
 
 	if (!dd->suspended)
 		return 0;
-
+	if (!dd->pdata->is_shared)
+		get_local_resources(dd);
 	msm_spi_clk_path_init(dd);
 	if (!dd->pdata->active_only)
 		msm_spi_clk_path_vote(dd);
+	if (!dd->pdata->is_shared && dd->use_dma) {
+		msm_spi_bam_pipe_connect(dd, &dd->bam.prod,
+				&dd->bam.prod.config);
+		msm_spi_bam_pipe_connect(dd, &dd->bam.cons,
+				&dd->bam.cons.config);
+	}
 	dd->suspended = 0;
 
 resume_exit:

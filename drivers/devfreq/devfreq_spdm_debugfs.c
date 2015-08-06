@@ -1,5 +1,5 @@
 /*
-*Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+*Copyright (c) 2014, The Linux Foundation. All rights reserved.
 *
 *This program is free software; you can redistribute it and/or modify
 *it under the terms of the GNU General Public License version 2 and
@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <soc/qcom/hvc.h>
 #include "devfreq_spdm.h"
 
 static int spdm_open(struct inode *inode, struct file *file)
@@ -28,8 +29,7 @@ static ssize_t pl_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 	int i;
 
 	buf = kzalloc(size, GFP_KERNEL);
@@ -47,10 +47,8 @@ static ssize_t pl_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	for (i = 0; i < SPDM_PL_COUNT - 1; i++)
 		desc.arg[i+2] = spdm_data->config_data.pl_freqs[i];
-	ext_status = spdm_ext_call(&desc, SPDM_PL_COUNT + 1);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -66,8 +64,7 @@ static ssize_t rejrate_low_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -83,10 +80,8 @@ static ssize_t rejrate_low_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.reject_rate[0];
 	desc.arg[3] = spdm_data->config_data.reject_rate[1];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -102,8 +97,7 @@ static ssize_t rejrate_med_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -118,10 +112,8 @@ static ssize_t rejrate_med_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.reject_rate[2];
 	desc.arg[3] = spdm_data->config_data.reject_rate[3];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -137,8 +129,7 @@ static ssize_t rejrate_high_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -153,10 +144,8 @@ static ssize_t rejrate_high_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.reject_rate[4];
 	desc.arg[3] = spdm_data->config_data.reject_rate[5];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -172,8 +161,7 @@ static ssize_t resptime_low_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -188,10 +176,8 @@ static ssize_t resptime_low_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.response_time_us[0];
 	desc.arg[3] = spdm_data->config_data.response_time_us[1];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -207,8 +193,7 @@ static ssize_t resptime_med_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -223,10 +208,8 @@ static ssize_t resptime_med_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.response_time_us[2];
 	desc.arg[3] = spdm_data->config_data.response_time_us[3];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -242,8 +225,7 @@ static ssize_t resptime_high_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -258,10 +240,8 @@ static ssize_t resptime_high_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.response_time_us[4];
 	desc.arg[3] = spdm_data->config_data.response_time_us[5];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -277,8 +257,7 @@ static ssize_t cciresptime_low_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -293,10 +272,8 @@ static ssize_t cciresptime_low_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.cci_response_time_us[0];
 	desc.arg[3] = spdm_data->config_data.cci_response_time_us[1];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -312,8 +289,7 @@ static ssize_t cciresptime_med_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -328,10 +304,8 @@ static ssize_t cciresptime_med_write(struct file *file, const char __user *data,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.cci_response_time_us[2];
 	desc.arg[3] = spdm_data->config_data.cci_response_time_us[3];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -348,8 +322,7 @@ static ssize_t cciresptime_high_write(struct file *file,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -364,10 +337,8 @@ static ssize_t cciresptime_high_write(struct file *file,
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.cci_response_time_us[4];
 	desc.arg[3] = spdm_data->config_data.cci_response_time_us[5];
-	ext_status = spdm_ext_call(&desc, 4);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -383,8 +354,7 @@ static ssize_t cci_max_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -397,10 +367,8 @@ static ssize_t cci_max_write(struct file *file, const char __user *data,
 	desc.arg[0] = SPDM_CMD_CFG_MAXCCI;
 	desc.arg[1] = spdm_data->spdm_client;
 	desc.arg[2] = spdm_data->config_data.max_cci_freq;
-	ext_status = spdm_ext_call(&desc, 3);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;
@@ -416,8 +384,7 @@ static ssize_t vote_cfg_write(struct file *file, const char __user *data,
 {
 	struct spdm_data *spdm_data = file->private_data;
 	char *buf;
-	struct spdm_args desc = { { 0 } };
-	int ext_status = 0;
+	struct hvc_desc desc;
 
 	buf = kzalloc(size, GFP_KERNEL);
 
@@ -436,10 +403,8 @@ static ssize_t vote_cfg_write(struct file *file, const char __user *data,
 	desc.arg[3] = spdm_data->config_data.downstep;
 	desc.arg[4] = spdm_data->config_data.max_vote;
 	desc.arg[5] = spdm_data->config_data.up_step_multp;
-	ext_status = spdm_ext_call(&desc, 6);
-	if (ext_status)
-		pr_err("External command %u failed with error %u",
-			(int)desc.arg[0], ext_status);
+	if (hvc(HVC_FN_SIP(SPDM_HYP_FNID), &desc))
+		pr_debug("check hvc logs");
 	*offset += size;
 	kfree(buf);
 	return size;

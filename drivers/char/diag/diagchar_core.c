@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -343,6 +343,11 @@ static int diagchar_close(struct inode *inode, struct file *file)
 
 	if (!driver)
 		return -ENOMEM;
+
+	if(driver->silent_log_pid) {
+		put_pid(driver->silent_log_pid);
+		driver->silent_log_pid = NULL;
+	}
 
 	/* clean up any DCI registrations, if this is a DCI client
 	* This will specially help in case of ungraceful exit of any DCI client
@@ -896,6 +901,19 @@ static int diag_switch_logging(int requested_mode)
 					driver->logging_mode);
 		return 0;
 	}
+
+	if (requested_mode != MEMORY_DEVICE_MODE)
+		diag_update_real_time_vote(DIAG_PROC_MEMORY_DEVICE,
+					   MODE_REALTIME, ALL_PROC);
+	else
+		diag_update_proc_vote(DIAG_PROC_MEMORY_DEVICE, VOTE_UP,
+				      ALL_PROC);
+
+	if (!(requested_mode == MEMORY_DEVICE_MODE &&
+					driver->logging_mode == USB_MODE))
+		queue_work(driver->diag_real_time_wq,
+						&driver->diag_real_time_work);
+
 	mutex_lock(&driver->diagchar_mutex);
 	temp = driver->logging_mode;
 	driver->logging_mode = requested_mode;
@@ -936,19 +954,6 @@ static int diag_switch_logging(int requested_mode)
 	}
 
 	driver->logging_process_id = current->tgid;
-	if (driver->logging_mode != MEMORY_DEVICE_MODE) {
-		diag_update_real_time_vote(DIAG_PROC_MEMORY_DEVICE,
-						MODE_REALTIME, ALL_PROC);
-	} else {
-		diag_update_proc_vote(DIAG_PROC_MEMORY_DEVICE, VOTE_UP,
-						ALL_PROC);
-	}
-
-	if (!(driver->logging_mode == MEMORY_DEVICE_MODE &&
-					temp == USB_MODE))
-		queue_work(driver->diag_real_time_wq,
-						&driver->diag_real_time_work);
-
 	status = diag_mux_switch_logging(new_mode);
 	if (status) {
 		if (requested_mode == MEMORY_DEVICE_MODE)
@@ -1289,6 +1294,10 @@ long diagchar_compat_ioctl(struct file *filp,
 		if (copy_from_user((void *)&req_logging_mode,
 					(void __user *)ioarg, sizeof(int)))
 			return -EFAULT;
+		/*
+		 * Get a pid of diag_mdlog(app) and save it.
+		 */
+		driver->silent_log_pid = get_pid(task_pid(current));
 		result = diag_switch_logging(req_logging_mode);
 		break;
 	case DIAG_IOCTL_REMOTE_DEV:
@@ -1386,6 +1395,10 @@ long diagchar_ioctl(struct file *filp,
 		if (copy_from_user((void *)&req_logging_mode,
 					(void __user *)ioarg, sizeof(int)))
 			return -EFAULT;
+		/*
+		 * Get a pid of diag_mdlog(app) and save it.
+		 */
+		driver->silent_log_pid = get_pid(task_pid(current));
 		result = diag_switch_logging(req_logging_mode);
 		break;
 	case DIAG_IOCTL_REMOTE_DEV:
@@ -1411,6 +1424,26 @@ long diagchar_ioctl(struct file *filp,
 	}
 	return result;
 }
+
+/*
+ * silent_log_panic_handler()
+ * If the silent log is enabled for CP and CP is in
+ * trouble, diag_mdlog (APP) should be terminated before
+ * a panic occurs, since it can flush logs to SD card
+ * when it is over. So, please use this function to termimate it.
+ */
+int silent_log_panic_handler(void)
+{
+	int ret = 0;
+	if(driver->silent_log_pid) {
+		pr_info("%s: killing slient log...\n", __func__);
+		kill_pid(driver->silent_log_pid, SIGTERM, 1);
+		driver->silent_log_pid = NULL;
+		ret = 1;
+	}
+	return ret;
+}
+EXPORT_SYMBOL(silent_log_panic_handler);
 
 static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 			  loff_t *ppos)

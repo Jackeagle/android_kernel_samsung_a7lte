@@ -624,8 +624,7 @@ static int mdss_mdp_wb_dequeue(struct msm_fb_data_type *mfd,
 	return ret;
 }
 
-int mdss_mdp_wb_kickoff(struct msm_fb_data_type *mfd,
-		struct mdss_mdp_commit_cb *commit_cb)
+int mdss_mdp_wb_kickoff(struct msm_fb_data_type *mfd)
 {
 	struct mdss_mdp_wb *wb = mfd_to_wb(mfd);
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
@@ -679,17 +678,7 @@ int mdss_mdp_wb_kickoff(struct msm_fb_data_type *mfd,
 		pr_err("error on commit ctl=%d\n", ctl->num);
 		goto kickoff_fail;
 	}
-
-	if (commit_cb)
-		commit_cb->commit_cb_fnc(
-			MDP_COMMIT_STAGE_SETUP_DONE,
-			commit_cb->data);
-
 	mdss_mdp_display_wait4comp(ctl);
-
-	if (commit_cb)
-		commit_cb->commit_cb_fnc(MDP_COMMIT_STAGE_READY_FOR_KICKOFF,
-			commit_cb->data);
 
 	if (wb && node) {
 		mutex_lock(&wb->lock);
@@ -798,7 +787,9 @@ int mdss_mdp_wb_ioctl_handler(struct msm_fb_data_type *mfd, u32 cmd,
 		}
 		break;
 	case MSMFB_WRITEBACK_TERMINATE:
+		mdss_iommu_ctrl(1);
 		ret = mdss_mdp_wb_terminate(mfd);
+		mdss_iommu_ctrl(0);
 		break;
 	case MSMFB_WRITEBACK_SET_MIRRORING_HINT:
 		if (!copy_from_user(&hint, arg, sizeof(hint))) {

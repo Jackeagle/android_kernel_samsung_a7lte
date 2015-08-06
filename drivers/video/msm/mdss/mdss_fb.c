@@ -54,6 +54,11 @@
 #include "mdss_fb.h"
 #include "mdss_mdp_splash_logo.h"
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+#include "samsung/ss_dsi_panel_common.h" /* UTIL HEADER */
+#endif
+
+
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
 #define MDSS_FB_NUM 3
 #else
@@ -104,8 +109,6 @@ static int mdss_fb_pan_idle(struct msm_fb_data_type *mfd);
 static int mdss_fb_send_panel_event(struct msm_fb_data_type *mfd,
 					int event, void *arg);
 static void mdss_fb_set_mdp_sync_pt_threshold(struct msm_fb_data_type *mfd);
-static void mdss_panelinfo_to_fb_var(struct mdss_panel_info *pinfo,
-					struct fb_var_screeninfo *var);
 void mdss_fb_no_update_notify_timer_cb(unsigned long data)
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)data;
@@ -497,22 +500,6 @@ static ssize_t mdss_fb_get_panel_info(struct device *dev,
 	return ret;
 }
 
-static ssize_t mdss_fb_get_panel_status(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct fb_info *fbi = dev_get_drvdata(dev);
-	struct msm_fb_data_type *mfd = fbi->par;
-	int ret;
-	int panel_status;
-
-	panel_status = mdss_fb_send_panel_event(mfd,
-			MDSS_EVENT_DSI_PANEL_STATUS, NULL);
-	ret = scnprintf(buf, PAGE_SIZE, "panel_status=%s\n",
-		panel_status > 0 ? "alive" : "dead");
-
-	return ret;
-}
-
 /*
  * mdss_fb_lpm_enable() - Function to Control LowPowerMode
  * @mfd:	Framebuffer data structure for display
@@ -660,8 +647,7 @@ static DEVICE_ATTR(msm_fb_thermal_level, S_IRUGO | S_IWUSR,
 	mdss_fb_get_thermal_level, mdss_fb_set_thermal_level);
 static DEVICE_ATTR(always_on, S_IRUGO | S_IWUSR | S_IWGRP,
 	mdss_fb_get_doze_mode, mdss_fb_set_doze_mode);
-static DEVICE_ATTR(msm_fb_panel_status, S_IRUGO,
-	mdss_fb_get_panel_status, NULL);
+
 static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
 	&dev_attr_msm_fb_split.attr,
@@ -672,7 +658,6 @@ static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_src_split_info.attr,
 	&dev_attr_msm_fb_thermal_level.attr,
 	&dev_attr_always_on.attr,
-	&dev_attr_msm_fb_panel_status.attr,
 	NULL,
 };
 
@@ -1113,13 +1098,13 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 		 * as well as setting bl_level to bkl_lvl even though the
 		 * backlight has been set to the scaled value.
 		 */
-		if (mfd->bl_level_old == temp) {
+		if (mfd->bl_level_scaled == temp) {
 			mfd->bl_level = bkl_lvl;
 		} else {
 			pr_debug("backlight sent to panel :%d\n", temp);
 			pdata->set_backlight(pdata, temp);
 			mfd->bl_level = bkl_lvl;
-			mfd->bl_level_old = temp;
+			mfd->bl_level_scaled = temp;
 			bl_notify_needed = true;
 		}
 		if (bl_notify_needed)
@@ -1145,7 +1130,7 @@ void mdss_fb_update_backlight(struct msm_fb_data_type *mfd)
 				(*mfd->mdp.ad_calc_bl)(mfd, temp, &temp,
 								&bl_notify);
 			pdata->set_backlight(pdata, temp);
-			mfd->bl_level_old = mfd->unset_bl_level;
+			mfd->bl_level_scaled = mfd->unset_bl_level;
 			mfd->bl_updated = 1;
 			mdss_fb_bl_update_notify(mfd);
 		}
@@ -1185,34 +1170,6 @@ static void mdss_fb_stop_disp_thread(struct msm_fb_data_type *mfd)
 	mfd->disp_thread = NULL;
 }
 
-static void mdss_panel_validate_debugfs_info(struct msm_fb_data_type *mfd)
-{
-	struct mdss_panel_info *panel_info = mfd->panel_info;
-	struct fb_info *fbi = mfd->fbi;
-	struct fb_var_screeninfo *var = &fbi->var;
-	struct mdss_panel_data *pdata = container_of(panel_info,
-				struct mdss_panel_data, panel_info);
-
-	if (panel_info->debugfs_info->override_flag) {
-		if (mfd->mdp.off_fnc) {
-			mfd->panel_reconfig = true;
-			mfd->mdp.off_fnc(mfd);
-			mfd->panel_reconfig = false;
-		}
-
-		pr_debug("Overriding panel_info with debugfs_info\n");
-		panel_info->debugfs_info->override_flag = 0;
-		mdss_panel_debugfsinfo_to_panelinfo(panel_info);
-		if (is_panel_split(mfd) && pdata->next)
-			mdss_fb_validate_split(pdata->panel_info.xres,
-					pdata->next->panel_info.xres, mfd);
-		mdss_panelinfo_to_fb_var(panel_info, var);
-		if (mdss_fb_send_panel_event(mfd, MDSS_EVENT_CHECK_PARAMS,
-							panel_info))
-			pr_err("Failed to send panel event CHECK_PARAMS\n");
-	}
-}
-
 static int mdss_fb_unblank_sub(struct msm_fb_data_type *mfd)
 {
 	int ret = 0;
@@ -1220,9 +1177,6 @@ static int mdss_fb_unblank_sub(struct msm_fb_data_type *mfd)
 
 	if (!mfd)
 		return -EINVAL;
-
-	if (mfd->panel_info->debugfs_info)
-		mdss_panel_validate_debugfs_info(mfd);
 
 	/* Start Display thread */
 	if (mfd->disp_thread == NULL) {
@@ -1252,6 +1206,17 @@ static int mdss_fb_unblank_sub(struct msm_fb_data_type *mfd)
 			schedule_delayed_work(&mfd->idle_notify_work,
 				msecs_to_jiffies(mfd->idle_time));
 	}
+
+	/* Reset the backlight only if the panel was off */
+	if (mdss_panel_is_power_off(cur_power_state)) {
+		mutex_lock(&mfd->bl_lock);
+		if (!mfd->bl_updated) {
+			mfd->bl_updated = 1;
+			mdss_fb_set_backlight(mfd, mfd->unset_bl_level);
+		}
+		mutex_unlock(&mfd->bl_lock);
+	}
+
 error:
 	return ret;
 }
@@ -1262,6 +1227,9 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
 	int ret = 0;
 	int cur_power_state, req_power_state = MDSS_PANEL_POWER_OFF;
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	struct samsung_display_driver_data *vdd = samsung_get_vdd();
+#endif
 
 	if (!mfd || !op_enable)
 		return -EPERM;
@@ -1288,6 +1256,11 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 		else
 			blank_mode = FB_BLANK_UNBLANK;
 	}
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+		if (info->node <= (SUPPORT_PANEL_COUNT - 1))
+					vdd->vdd_blank_mode[info->node] =  blank_mode;
+#endif
+
 
 	switch (blank_mode) {
 	case FB_BLANK_UNBLANK:
@@ -1335,7 +1308,10 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 				/* Stop Display thread */
 				if (mfd->disp_thread)
 					mdss_fb_stop_disp_thread(mfd);
-				mfd->bl_updated = 0;
+				if( !mfd->panel_info->panel_dead){
+					mdss_fb_set_backlight(mfd, 0);
+					mfd->bl_updated = 0;
+				}
 			}
 			mfd->panel_power_state = req_power_state;
 			mutex_unlock(&mfd->bl_lock);
@@ -1936,7 +1912,11 @@ static int mdss_fb_register(struct msm_fb_data_type *mfd)
 	var->right_margin = panel_info->lcdc.h_front_porch;
 	var->hsync_len = panel_info->lcdc.h_pulse_width;
 	var->pixclock = panel_info->clk_rate / 1000;
-
+#if defined(CONFIG_PANEL_S6D7AA0_LTL101AT01_WXGA) || defined(CONFIG_PANEL_S6D7AA0_LSL080AL03_WXGA)
+	/*Temperary change to support XGA resolution*/
+	var->xres = 768;
+	var->yres = 1024;
+#endif
 	/*
 	 * Populate smem length here for uspace to get the
 	 * Framebuffer size when FBIO_FSCREENINFO ioctl is
@@ -1995,7 +1975,6 @@ static int mdss_fb_register(struct msm_fb_data_type *mfd)
 		return -EPERM;
 	}
 
-	mdss_panel_debugfs_init(panel_info);
 	pr_info("FrameBuffer[%d] %dx%d registered successfully!\n", mfd->index,
 					fbi->var.xres, fbi->var.yres);
 
@@ -2637,23 +2616,6 @@ static void mdss_fb_var_to_panelinfo(struct fb_var_screeninfo *var,
 	pinfo->lcdc.h_back_porch = var->left_margin;
 	pinfo->lcdc.h_pulse_width = var->hsync_len;
 	pinfo->clk_rate = var->pixclock;
-}
-
-static void mdss_panelinfo_to_fb_var(struct mdss_panel_info *pinfo,
-						struct fb_var_screeninfo *var)
-{
-	struct mdss_panel_data *pdata = container_of(pinfo,
-				struct mdss_panel_data, panel_info);
-
-	var->xres = mdss_fb_get_panel_xres(&pdata->panel_info);
-	var->yres = pinfo->yres;
-	var->lower_margin = pinfo->lcdc.v_front_porch;
-	var->upper_margin = pinfo->lcdc.v_back_porch;
-	var->vsync_len = pinfo->lcdc.v_pulse_width;
-	var->right_margin = pinfo->lcdc.h_front_porch;
-	var->left_margin = pinfo->lcdc.h_back_porch;
-	var->hsync_len = pinfo->lcdc.h_pulse_width;
-	var->pixclock = pinfo->clk_rate;
 }
 
 /**

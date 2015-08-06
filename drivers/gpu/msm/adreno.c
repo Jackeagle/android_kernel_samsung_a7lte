@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -356,7 +356,7 @@ static int adreno_soft_reset(struct kgsl_device *device);
  */
 void _soft_reset(struct adreno_device *adreno_dev)
 {
-	struct adreno_gpudev *gpudev  = ADRENO_GPU_DEVICE(adreno_dev);
+	struct kgsl_device *device = &adreno_dev->dev;
 	unsigned int reg;
 
 	adreno_writereg(adreno_dev, ADRENO_REG_RBBM_SW_RESET_CMD, 1);
@@ -368,9 +368,8 @@ void _soft_reset(struct adreno_device *adreno_dev)
 	adreno_writereg(adreno_dev, ADRENO_REG_RBBM_SW_RESET_CMD, 0);
 
 	/* The SP/TP regulator gets turned off after a soft reset */
-
-	if (gpudev->regulator_enable)
-		gpudev->regulator_enable(adreno_dev);
+	if (device->ftbl->regulator_enable)
+		device->ftbl->regulator_enable(device);
 }
 
 
@@ -511,8 +510,6 @@ adreno_identify_gpu(struct adreno_device *adreno_dev)
 		if (reg_offsets->offset_0 != i && !reg_offsets->offsets[i])
 			reg_offsets->offsets[i] = ADRENO_REG_UNUSED;
 	}
-	if (gpudev->gpudev_init)
-		gpudev->gpudev_init(adreno_dev);
 }
 
 static const struct platform_device_id adreno_id_table[] = {
@@ -1241,35 +1238,6 @@ static int adreno_start(struct kgsl_device *device, int priority)
 	return ret;
 }
 
-/**
- * adreno_vbif_clear_pending_transactions() - Clear transactions in VBIF pipe
- * @device: Pointer to the device whose VBIF pipe is to be cleared
- */
-static void adreno_vbif_clear_pending_transactions(struct kgsl_device *device)
-{
-	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
-	unsigned int mask = gpudev->vbif_xin_halt_ctrl0_mask;
-	unsigned int val;
-	unsigned long wait_for_vbif;
-
-	adreno_writereg(adreno_dev, ADRENO_REG_VBIF_XIN_HALT_CTRL0, mask);
-	/* wait for the transactions to clear */
-	wait_for_vbif = jiffies + msecs_to_jiffies(100);
-	while (1) {
-		adreno_readreg(adreno_dev,
-			ADRENO_REG_VBIF_XIN_HALT_CTRL1, &val);
-		if ((val & mask) == mask)
-			break;
-		if (time_after(jiffies, wait_for_vbif)) {
-			KGSL_DRV_ERR(device,
-				"Wait limit reached for VBIF XIN Halt\n");
-			break;
-		}
-	}
-	adreno_writereg(adreno_dev, ADRENO_REG_VBIF_XIN_HALT_CTRL0, 0);
-}
-
 static int adreno_stop(struct kgsl_device *device)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
@@ -1323,15 +1291,8 @@ int adreno_reset(struct kgsl_device *device)
 	struct kgsl_mmu *mmu = &device->mmu;
 	int i = 0;
 
-	/* clear pending vbif transactions before reset */
-	adreno_vbif_clear_pending_transactions(device);
-
-	/*
-	 * Try soft reset first, for non mmu fault case only.
-	 * Skip soft reset and use hard reset for A304 GPU, As
-	 * A304 is not able to do SMMU programming after soft reset.
-	 */
-	if (!atomic_read(&mmu->fault) && !adreno_is_a304(adreno_dev)) {
+	/* Try soft reset first, for non mmu fault case only */
+	if (!atomic_read(&mmu->fault)) {
 		ret = adreno_soft_reset(device);
 		if (ret)
 			KGSL_DEV_ERR_ONCE(device, "Device soft reset failed\n");
@@ -2891,9 +2852,6 @@ static int kgsl_busmon_probe(struct platform_device *pdev)
 	struct kgsl_device *device;
 	const struct of_device_id *pdid =
 			of_match_device(busmon_match_table, &pdev->dev);
-
-	if (pdid == NULL)
-		return -ENXIO;
 
 	device = (struct kgsl_device *)pdid->data;
 	device->busmondev = &pdev->dev;
