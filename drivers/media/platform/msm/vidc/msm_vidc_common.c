@@ -295,7 +295,7 @@ static int msm_comm_vote_bus(struct msm_vidc_core *core)
 	mutex_unlock(&core->lock);
 
 	rc = call_hfi_op(hdev, vote_bus, hdev->hfi_device_data, vote_data,
-			vote_data_count);
+			vote_data_count, core->idle_stats.fb_err_level);
 	if (rc)
 		dprintk(VIDC_ERR, "Failed to scale bus: %d\n", rc);
 
@@ -697,25 +697,12 @@ static void handle_event_change(enum command_response cmd, void *data)
 				__func__, inst, &event_notify->packet_buffer,
 				&event_notify->extra_data_buffer);
 
-			/*
-			* If buffer release event is received with inst->state
-			* greater than STOP means client called STOP directly
-			* without FLUSH. This also means that they don't expect
-
-			* these buffers back. Processing these commands will not
-			* add any value. This can also results deadlocks between
-			* try_state and event_notify due to inst->sync_lock.
-			*/
-
-			mutex_lock(&inst->lock);
-			if (inst->state >= MSM_VIDC_STOP ||
-					inst->core->state == VIDC_CORE_INVALID) {
-				dprintk(VIDC_ERR,
+			if (inst->state == MSM_VIDC_CORE_INVALID ||
+				inst->core->state == VIDC_CORE_INVALID) {
+				dprintk(VIDC_DBG,
 					"Event release buf ref received in invalid state - discard\n");
-				mutex_unlock(&inst->lock);
 				return;
 			}
-			mutex_unlock(&inst->lock);
 
 			/*
 			* Get the buffer_info entry for the
@@ -2152,8 +2139,6 @@ static int msm_comm_session_abort(struct msm_vidc_inst *inst)
 		return -EINVAL;
 	}
 	hdev = inst->core->device;
-	abort_completion = SESSION_MSG_INDEX(SESSION_ABORT_DONE);
-	init_completion(&inst->completions[abort_completion]);
 
 	rc = call_hfi_op(hdev, session_abort, (void *)inst->session);
 	if (rc) {
@@ -2161,6 +2146,8 @@ static int msm_comm_session_abort(struct msm_vidc_inst *inst)
 			"%s session_abort failed rc: %d\n", __func__, rc);
 		return rc;
 	}
+	abort_completion = SESSION_MSG_INDEX(SESSION_ABORT_DONE);
+	init_completion(&inst->completions[abort_completion]);
 	rc = wait_for_completion_timeout(
 			&inst->completions[abort_completion],
 			msecs_to_jiffies(msm_vidc_hw_rsp_timeout));
@@ -2172,7 +2159,7 @@ static int msm_comm_session_abort(struct msm_vidc_inst *inst)
 	} else {
 		rc = 0;
 	}
-	msm_comm_session_clean(inst);
+
 	return rc;
 }
 
@@ -2541,9 +2528,11 @@ static int msm_vidc_load_resources(int flipped_state,
 		dprintk(VIDC_ERR, "HW is overloaded, needed: %d max: %d\n",
 			num_mbs_per_sec, core->resources.max_load);
 		msm_vidc_print_running_insts(core);
+#if 0 /* Samsung skips the overloaded error return  */
 		inst->state = MSM_VIDC_CORE_INVALID;
 		msm_comm_kill_session(inst);
 		return -EBUSY;
+#endif
 	}
 
 	hdev = core->device;
@@ -4346,7 +4335,9 @@ static int msm_vidc_load_supported(struct msm_vidc_inst *inst)
 				num_mbs_per_sec,
 				inst->core->resources.max_load);
 			msm_vidc_print_running_insts(inst->core);
+#if 0 /* Samsung skips the overloaded error return  */	
 			return -EBUSY;
+#endif
 		}
 	}
 	return 0;

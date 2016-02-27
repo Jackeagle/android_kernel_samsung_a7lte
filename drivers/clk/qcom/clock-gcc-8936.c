@@ -272,7 +272,7 @@ static void __iomem *virt_dbgbase;
 #define CAMSS_TOP_AHB_CMD_RCGR				0x5A000
 #define BIMC_GFX_CBCR					0x31024
 #define BIMC_GPU_CBCR					0x31040
-
+#define SNOC_QOSGEN					0x2601C
 #define APCS_CCI_PLL_MODE				0x00000
 #define APCS_CCI_PLL_L_VAL				0x00004
 #define APCS_CCI_PLL_M_VAL				0x00008
@@ -480,7 +480,6 @@ static struct pll_clk a53ss_cci_pll = {
 static struct pll_freq_tbl apcs_c0_pll_freq[] = {
 	F_APCS_PLL( 998400000,  52, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1113600000,  58, 0x0, 0x1, 0x0, 0x0, 0x0),
-	F_APCS_PLL(1209600000,  63, 0x0, 0x1, 0x0, 0x0, 0x0),
 };
 
 static struct pll_clk a53ss_c0_pll = {
@@ -524,7 +523,6 @@ static struct pll_freq_tbl apcs_c1_pll_freq[] = {
 	F_APCS_PLL( 998400000, 52, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1036800000, 54, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1113600000, 58, 0x0, 0x1, 0x0, 0x0, 0x0),
-	F_APCS_PLL(1209600000, 63, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1190400000, 62, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1267200000, 66, 0x0, 0x1, 0x0, 0x0, 0x0),
 	F_APCS_PLL(1344000000, 70, 0x0, 0x1, 0x0, 0x0, 0x0),
@@ -1162,6 +1160,7 @@ static struct rcg_clk jpeg0_clk_src = {
 
 static struct clk_freq_tbl ftbl_gcc_camss_mclk0_1_2_clk[] = {
 	F(  24000000,      gpll6_mclk,  1,   1,    45),
+	F(  26024000,      gpll6_mclk,  1,   2,    83),
 	F(  66670000,	   gpll0_out_main,  12,	  0,	0),
 	F_END
 };
@@ -2956,6 +2955,20 @@ static struct pll_config_regs gpll4_regs = {
 	.base = &virt_bases[GCC_BASE],
 };
 
+static struct gate_clk gcc_snoc_qosgen_clk = {
+	.en_mask = BIT(0),
+	.en_reg = SNOC_QOSGEN,
+	.base = &virt_bases[GCC_BASE],
+	.c = {
+		.dbg_name = "gcc_snoc_qosgen_clk",
+		.ops = &clk_ops_gate,
+		.flags = CLKFLAG_SKIP_HANDOFF,
+		CLK_INIT(gcc_snoc_qosgen_clk.c),
+	},
+};
+
+
+
 static struct mux_clk gcc_debug_mux;
 static struct clk_ops clk_ops_debug_mux;
 
@@ -3081,7 +3094,7 @@ static struct mux_clk gcc_debug_mux = {
 		{&gcc_crypto_clk.c,			0x0138},
 		{&gcc_crypto_axi_clk.c,			0x0139},
 		{&gcc_crypto_ahb_clk.c,			0x013a},
-		{&gcc_oxili_timer_clk.c,		0x01e9},
+                {&gcc_oxili_timer_clk.c,		0x01e9},
 		{&gcc_oxili_gfx3d_clk.c,		0x01ea},
 		{&gcc_oxili_ahb_clk.c,			0x01eb},
 		{&gcc_oxili_gmem_clk.c,			0x01f0},
@@ -3295,6 +3308,9 @@ static struct clk_lookup msm_clocks_lookup[] = {
 	CLK_LIST(gcc_crypto_ahb_clk),
 	CLK_LIST(gcc_crypto_axi_clk),
 	CLK_LIST(crypto_clk_src),
+
+	/* QoS Reference clock */
+	CLK_LIST(gcc_snoc_qosgen_clk),
 };
 
 /* Please note that the order of reg-names is important */
@@ -3337,14 +3353,10 @@ static int msm_gcc_probe(struct platform_device *pdev)
 	struct clk *tmp_clk;
 	int ret;
 	u32 regval;
-	bool compat_bin = false;
 
 	ret = get_memory(pdev);
 	if (ret)
 		return ret;
-
-	compat_bin = of_device_is_compatible(pdev->dev.of_node,
-						"qcom,gcc-8936-v3");
 
 	vdd_dig.regulator[0] = devm_regulator_get(&pdev->dev, "vdd_dig");
 	if (IS_ERR(vdd_dig.regulator[0])) {
@@ -3421,9 +3433,6 @@ static int msm_gcc_probe(struct platform_device *pdev)
 	clk_set_rate(&apss_ahb_clk_src.c, 19200000);
 	clk_prepare_enable(&apss_ahb_clk_src.c);
 
-	if (compat_bin)
-		gcc_bimc_gfx_clk.c.depends = NULL;
-
 	dev_info(&pdev->dev, "Registered GCC clocks\n");
 
 	return 0;
@@ -3431,7 +3440,6 @@ static int msm_gcc_probe(struct platform_device *pdev)
 
 static struct of_device_id msm_clock_gcc_match_table[] = {
 	{ .compatible = "qcom,gcc-8936" },
-	{ .compatible = "qcom,gcc-8936-v3" },
 	{}
 };
 
